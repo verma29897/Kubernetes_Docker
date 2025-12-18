@@ -72,13 +72,13 @@ Kubernetes follows a master-worker architecture with a declarative model. Users 
 ### Architecture Diagram
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Control Plane                           │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐     │
-│  │  API Server │  │  Scheduler   │  │ Controller Mgr  │     │
-│  └─────────────┘  └──────────────┘  └─────────────────┘     │
-│  ┌─────────────┐  ┌──────────────┐                          │
-│  │    etcd     │  │ Cloud Ctrl   │                          │
-│  └─────────────┘  └──────────────┘                          │
+│                     Control Plane                            │
+│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐   │
+│  │  API Server │  │  Scheduler   │  │ Controller Mgr  │   │
+│  └─────────────┘  └──────────────┘  └─────────────────┘   │
+│  ┌─────────────┐  ┌──────────────┐                         │
+│  │    etcd     │  │ Cloud Ctrl   │                         │
+│  └─────────────┘  └──────────────┘                         │
 └─────────────────────────────────────────────────────────────┘
                             │
         ┌───────────────────┼───────────────────┐
@@ -3742,3 +3742,2620 @@ spec:
 - **ReadWriteOncePod (RWOP)**: Single pod read-write (K8s 1.27+)
 
 ### Reclaim Policies
+
+- **Retain**: PV remains after PVC deletion (manual cleanup required)
+- **Delete**: PV and underlying storage deleted when PVC is deleted
+- **Recycle**: Basic scrub (`rm -rf`) before making available again (deprecated)
+
+### PersistentVolume Examples
+
+#### NFS PersistentVolume
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+  - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: nfs
+  nfs:
+    server: 192.168.1.100
+    path: /exports/data
+```
+
+#### AWS EBS PersistentVolume
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: ebs-pv
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: gp3
+  awsElasticBlockStore:
+    volumeID: vol-0123456789abcdef
+    fsType: ext4
+```
+
+#### Local PersistentVolume
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  local:
+    path: /mnt/disks/ssd1
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - worker-node-1
+```
+
+---
+
+## PersistentVolumeClaim (PVC)
+
+### Overview
+PersistentVolumeClaim is a request for storage by a user. Kubernetes binds PVC to suitable PV.
+
+### Basic PVC
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast-ssd
+```
+
+### PVC Binding Process
+```
+1. User creates PVC
+2. K8s finds matching PV (capacity, access mode, storage class)
+3. PVC bound to PV
+4. Pod uses PVC
+```
+
+### PVC in Pod
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-pod
+spec:
+  containers:
+  - name: app
+    image: nginx
+    volumeMounts:
+    - name: storage
+      mountPath: /data
+  volumes:
+  - name: storage
+    persistentVolumeClaim:
+      claimName: my-pvc
+```
+
+### PVC with StatefulSet
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: web
+spec:
+  serviceName: nginx
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+        volumeMounts:
+        - name: www
+          mountPath: /usr/share/nginx/html
+  volumeClaimTemplates:
+  - metadata:
+      name: www
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 10Gi
+```
+
+---
+
+## StorageClass
+
+### Overview
+StorageClass provides dynamic provisioning of PersistentVolumes. Eliminates manual PV creation.
+
+### Basic StorageClass
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+provisioner: kubernetes.io/aws-ebs
+parameters:
+  type: gp3
+  iops: "3000"
+  encrypted: "true"
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+```
+
+### Common Provisioners
+
+#### AWS EBS
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: aws-gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  iops: "3000"
+  throughput: "125"
+  encrypted: "true"
+  kmsKeyId: arn:aws:kms:us-east-1:123456789:key/xxx
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+```
+
+#### GCE Persistent Disk
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gce-ssd
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-ssd
+  replication-type: regional-pd
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+```
+
+#### Azure Disk
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: azure-premium
+provisioner: disk.csi.azure.com
+parameters:
+  storageaccounttype: Premium_LRS
+  kind: Managed
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+```
+
+#### NFS (using nfs-subdir-external-provisioner)
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nfs-client
+provisioner: k8s-sigs.io/nfs-subdir-external-provisioner
+parameters:
+  archiveOnDelete: "false"
+volumeBindingMode: Immediate
+```
+
+#### Local Storage
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-storage
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+```
+
+### Volume Binding Modes
+
+**Immediate**:
+- PV provisioned immediately when PVC created
+- May lead to pods not scheduling if volume in wrong zone
+
+**WaitForFirstConsumer**:
+- PV provisioned when first pod using PVC is scheduled
+- Ensures volume in correct zone/region
+
+### Dynamic Provisioning Example
+```yaml
+# StorageClass
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast
+provisioner: kubernetes.io/aws-ebs
+parameters:
+  type: gp3
+---
+# PVC (no PV needed - dynamically created)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dynamic-pvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: fast
+  resources:
+    requests:
+      storage: 20Gi
+---
+# Pod using PVC
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app
+spec:
+  containers:
+  - name: app
+    image: nginx
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: dynamic-pvc
+```
+
+### Volume Expansion
+```yaml
+# Enable in StorageClass
+allowVolumeExpansion: true
+
+# Expand PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-pvc
+spec:
+  resources:
+    requests:
+      storage: 50Gi  # Increased from 20Gi
+```
+
+---
+
+## CSI Drivers
+
+### Overview
+Container Storage Interface (CSI) is standard for exposing storage systems to containerized workloads.
+
+### Popular CSI Drivers
+- **AWS EBS CSI**: ebs.csi.aws.com
+- **GCE PD CSI**: pd.csi.storage.gke.io
+- **Azure Disk CSI**: disk.csi.azure.com
+- **Ceph RBD CSI**: rbd.csi.ceph.com
+- **NFS CSI**: nfs.csi.k8s.io
+- **Local Path Provisioner**: rancher.io/local-path
+
+### Installing CSI Driver (AWS EBS Example)
+```bash
+# Install EBS CSI driver
+kubectl apply -k "github.com/kubernetes-sigs/aws-ebs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.27"
+
+# Verify installation
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-ebs-csi-driver
+```
+
+### Volume Snapshots
+```yaml
+# VolumeSnapshotClass
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: csi-aws-vsc
+driver: ebs.csi.aws.com
+deletionPolicy: Delete
+---
+# VolumeSnapshot
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: my-snapshot
+spec:
+  volumeSnapshotClassName: csi-aws-vsc
+  source:
+    persistentVolumeClaimName: my-pvc
+---
+# Restore from snapshot
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: restored-pvc
+spec:
+  storageClassName: fast
+  dataSource:
+    name: my-snapshot
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+```
+
+---
+
+# Security
+
+## RBAC (Role-Based Access Control)
+
+### Overview
+RBAC regulates access to Kubernetes resources based on roles assigned to users/service accounts.
+
+### RBAC Components
+- **Role**: Permissions within a namespace
+- **ClusterRole**: Cluster-wide permissions
+- **RoleBinding**: Binds Role to subjects in namespace
+- **ClusterRoleBinding**: Binds ClusterRole to subjects cluster-wide
+
+### Basic Role
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: development
+  name: pod-reader
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+```
+
+### RoleBinding
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-pods
+  namespace: development
+subjects:
+- kind: User
+  name: jane
+  apiGroup: rbac.authorization.k8s.io
+- kind: ServiceAccount
+  name: app-sa
+  namespace: development
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+### ClusterRole
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-reader
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "namespaces", "persistentvolumes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods", "services"]
+  verbs: ["get", "list", "watch"]
+```
+
+### ClusterRoleBinding
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-reader-binding
+subjects:
+- kind: User
+  name: admin
+  apiGroup: rbac.authorization.k8s.io
+- kind: Group
+  name: system:authenticated
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cluster-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+### Common Role Examples
+
+#### Developer Role
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+  namespace: development
+rules:
+- apiGroups: ["", "apps", "batch"]
+  resources: ["pods", "deployments", "services", "jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+```
+
+#### Read-Only Role
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: read-only
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+```
+
+#### Admin Role (Namespace)
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: admin-binding
+  namespace: production
+subjects:
+- kind: User
+  name: admin-user
+roleRef:
+  kind: ClusterRole
+  name: admin  # Built-in ClusterRole
+  apiGroup: rbac.authorization.k8s.io
+```
+
+### ServiceAccount with Role
+```yaml
+# ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-sa
+  namespace: production
+---
+# Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-role
+  namespace: production
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: app-binding
+  namespace: production
+subjects:
+- kind: ServiceAccount
+  name: app-sa
+  namespace: production
+roleRef:
+  kind: Role
+  name: app-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Pod using ServiceAccount
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+  namespace: production
+spec:
+  serviceAccountName: app-sa
+  containers:
+  - name: app
+    image: myapp:1.0
+```
+
+### RBAC Testing
+```bash
+# Check if user can perform action
+kubectl auth can-i get pods --namespace=development --as=jane
+kubectl auth can-i create deployments --namespace=production --as=john
+kubectl auth can-i '*' '*' --all-namespaces --as=admin
+
+# Test ServiceAccount permissions
+kubectl auth can-i list secrets --as=system:serviceaccount:production:app-sa
+```
+
+---
+
+## ServiceAccount
+
+### Overview
+ServiceAccount provides identity for processes running in pods to interact with API server.
+
+### Default ServiceAccount
+```yaml
+# Every namespace has default ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: default
+```
+
+### Custom ServiceAccount
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-app-sa
+  namespace: production
+automountServiceAccountToken: true
+imagePullSecrets:
+- name: registry-secret
+```
+
+### Using ServiceAccount in Pod
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+spec:
+  serviceAccountName: my-app-sa
+  containers:
+  - name: app
+    image: myapp:1.0
+    # Token automatically mounted at /var/run/secrets/kubernetes.io/serviceaccount/token
+```
+
+### ServiceAccount Token
+```bash
+# View token from pod
+kubectl exec -it app-pod -- cat /var/run/secrets/kubernetes.io/serviceaccount/token
+
+# Get ServiceAccount token
+kubectl create token my-app-sa --duration=1h
+
+# Use token to access API
+TOKEN=$(kubectl create token my-app-sa)
+curl -k -H "Authorization: Bearer $TOKEN" https://kubernetes.default.svc/api/v1/namespaces/default/pods
+```
+
+---
+
+## Secrets
+
+### Overview
+Secrets store sensitive data like passwords, tokens, and keys.
+
+### Secret Types
+- **Opaque**: Arbitrary user-defined data (default)
+- **kubernetes.io/service-account-token**: ServiceAccount token
+- **kubernetes.io/dockerconfigjson**: Docker registry credentials
+- **kubernetes.io/tls**: TLS certificate and key
+- **kubernetes.io/basic-auth**: Basic authentication
+- **kubernetes.io/ssh-auth**: SSH authentication
+
+### Creating Secrets
+
+#### From Literal
+```bash
+kubectl create secret generic db-secret \
+  --from-literal=username=admin \
+  --from-literal=password=secretpass123
+```
+
+#### From File
+```bash
+echo -n 'admin' > username.txt
+echo -n 'secretpass123' > password.txt
+kubectl create secret generic db-secret \
+  --from-file=username=username.txt \
+  --from-file=password=password.txt
+```
+
+#### YAML Manifest
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-secret
+type: Opaque
+data:
+  # Base64 encoded values
+  username: YWRtaW4=
+  password: c2VjcmV0cGFzczEyMw==
+---
+# Or use stringData (not base64 encoded)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db-secret
+type: Opaque
+stringData:
+  username: admin
+  password: secretpass123
+```
+
+### Using Secrets
+
+#### Environment Variables
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-env-pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    env:
+    - name: DB_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: db-secret
+          key: username
+    - name: DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: db-secret
+          key: password
+    # Import all secret keys as env vars
+    envFrom:
+    - secretRef:
+        name: db-secret
+```
+
+#### Volume Mount
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-volume-pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    volumeMounts:
+    - name: secret-volume
+      mountPath: /etc/secrets
+      readOnly: true
+  volumes:
+  - name: secret-volume
+    secret:
+      secretName: db-secret
+      defaultMode: 0400
+      items:
+      - key: username
+        path: db-username
+      - key: password
+        path: db-password
+```
+
+### Docker Registry Secret
+```yaml
+# Create from command
+kubectl create secret docker-registry registry-secret \
+  --docker-server=registry.example.com \
+  --docker-username=user \
+  --docker-password=pass \
+  --docker-email=user@example.com
+
+# Use in pod
+apiVersion: v1
+kind: Pod
+metadata:
+  name: private-image-pod
+spec:
+  imagePullSecrets:
+  - name: registry-secret
+  containers:
+  - name: app
+    image: registry.example.com/myapp:1.0
+```
+
+### TLS Secret
+```yaml
+# Create from cert files
+kubectl create secret tls tls-secret \
+  --cert=path/to/tls.crt \
+  --key=path/to/tls.key
+
+# YAML
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tls-secret
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTi... (base64 encoded cert)
+  tls.key: LS0tLS1CRUdJTi... (base64 encoded key)
+```
+
+### Secret Best Practices
+- Enable encryption at rest
+- Use RBAC to restrict access
+- Rotate secrets regularly
+- Use external secret managers (Vault, AWS Secrets Manager)
+- Don't commit secrets to version control
+- Use sealed-secrets or external-secrets operator
+
+---
+
+## ConfigMap
+
+### Overview
+ConfigMap stores non-sensitive configuration data as key-value pairs.
+
+### Creating ConfigMaps
+
+#### From Literal
+```bash
+kubectl create configmap app-config \
+  --from-literal=app.name=myapp \
+  --from-literal=app.port=8080 \
+  --from-literal=log.level=info
+```
+
+#### From File
+```bash
+# config.properties
+app.name=myapp
+app.port=8080
+log.level=info
+
+kubectl create configmap app-config --from-file=config.properties
+```
+
+#### From Directory
+```bash
+kubectl create configmap app-config --from-file=./config-dir/
+```
+
+#### YAML Manifest
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  app.name: "myapp"
+  app.port: "8080"
+  log.level: "info"
+  # Multi-line config file
+  app.conf: |
+    [server]
+    host = 0.0.0.0
+    port = 8080
+    
+    [database]
+    host = postgres
+    port = 5432
+    name = mydb
+```
+
+### Using ConfigMaps
+
+#### Environment Variables
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configmap-env-pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    env:
+    - name: APP_NAME
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: app.name
+    - name: APP_PORT
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: app.port
+    # Import all keys as env vars
+    envFrom:
+    - configMapRef:
+        name: app-config
+```
+
+#### Volume Mount
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configmap-volume-pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    volumeMounts:
+    - name: config
+      mountPath: /etc/config
+  volumes:
+  - name: config
+    configMap:
+      name: app-config
+      items:
+      - key: app.conf
+        path: app.conf
+```
+
+#### Command Arguments
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configmap-args-pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    command: ["/app/start.sh"]
+    args:
+    - "--port=$(APP_PORT)"
+    - "--log-level=$(LOG_LEVEL)"
+    env:
+    - name: APP_PORT
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: app.port
+    - name: LOG_LEVEL
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: log.level
+```
+
+### ConfigMap vs Secret
+| Feature | ConfigMap | Secret |
+|---------|-----------|--------|
+| Purpose | Non-sensitive config | Sensitive data |
+| Storage | Plain text | Base64 encoded |
+| Encryption | No | Optional (at rest) |
+| Size Limit | 1MB | 1MB |
+| Use Case | App config, env vars | Passwords, tokens, keys |
+
+---
+
+## Pod Security
+
+### SecurityContext
+
+#### Pod-level SecurityContext
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secure-pod
+spec:
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 3000
+    fsGroup: 2000
+    fsGroupChangePolicy: "OnRootMismatch"
+    seccompProfile:
+      type: RuntimeDefault
+    supplementalGroups: [4000, 5000]
+  containers:
+  - name: app
+    image: nginx
+```
+
+#### Container-level SecurityContext
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secure-container-pod
+spec:
+  containers:
+  - name: app
+    image: nginx
+    securityContext:
+      runAsUser: 1000
+      runAsNonRoot: true
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+        add:
+        - NET_BIND_SERVICE
+      seLinuxOptions:
+        level: "s0:c123,c456"
+```
+
+### Capabilities
+```yaml
+spec:
+  containers:
+  - name: app
+    securityContext:
+      capabilities:
+        drop:
+        - ALL  # Drop all capabilities
+        add:
+        - NET_BIND_SERVICE  # Bind to ports < 1024
+        - SYS_TIME  # Set system time
+        - CHOWN  # Change file ownership
+```
+
+### Pod Security Standards
+
+#### Privileged
+```yaml
+# No restrictions - allows known privilege escalations
+apiVersion: v1
+kind: Pod
+metadata:
+  name: privileged-pod
+spec:
+  containers:
+  - name: app
+    image: nginx
+    securityContext:
+      privileged: true
+```
+
+#### Baseline
+```yaml
+# Minimally restrictive - prevents known privilege escalations
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: app
+    image: nginx
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+```
+
+#### Restricted
+```yaml
+# Heavily restricted - follows pod hardening best practices
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: app
+    image: nginx
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      capabilities:
+        drop:
+        - ALL
+    volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+  volumes:
+  - name: tmp
+    emptyDir: {}
+```
+
+---
+
+## NetworkPolicy (Security Perspective)
+
+### Default Deny All
+```yaml
+# Deny all ingress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+---
+# Deny all egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+---
+# Deny all ingress and egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+```
+
+### Whitelist Approach
+```yaml
+# Allow only specific traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-allow-frontend
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    - namespaceSelector:
+        matchLabels:
+          name: production
+    ports:
+    - protocol: TCP
+      port: 8080
+```
+
+---
+
+# Scaling & Availability
+
+## Horizontal Pod Autoscaler (HPA)
+
+### Overview
+HPA automatically scales number of pods based on CPU/memory utilization or custom metrics.
+
+### Basic HPA
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+### CPU-based HPA
+```bash
+# Create HPA via kubectl
+kubectl autoscale deployment myapp --cpu-percent=50 --min=2 --max=10
+```
+
+### Multi-metric HPA
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: multi-metric-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  # CPU
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  # Memory
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: AverageValue
+        averageValue: 500Mi
+  # Custom metric (requests per second)
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "1000"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+      - type: Pods
+        value: 4
+        periodSeconds: 30
+```
+
+### HPA Requirements
+```yaml
+# Deployment must have resource requests
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: myapp:1.0
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+```
+
+### Monitoring HPA
+```bash
+# Get HPA status
+kubectl get hpa
+kubectl describe hpa app-hpa
+
+# Watch HPA
+kubectl get hpa --watch
+
+# HPA events
+kubectl get events --field-selector involvedObject.name=app-hpa
+```
+
+---
+
+## Vertical Pod Autoscaler (VPA)
+
+### Overview
+VPA automatically adjusts CPU and memory requests/limits based on actual usage.
+
+### Installing VPA
+```bash
+git clone https://github.com/kubernetes/autoscaler.git
+cd autoscaler/vertical-pod-autoscaler
+./hack/vpa-up.sh
+```
+
+
+
+
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: app-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+  updatePolicy:
+    updateMode: "Auto"  # or "Recreate", "Initial", "Off"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: app
+      minAllowed:
+        cpu: 100m
+        memory: 128Mi
+      maxAllowed:
+        cpu: 2
+        memory: 2Gi
+      controlledResources: ["cpu", "memory"]
+```
+
+### VPA Update Modes
+- **Off**: Only provides recommendations
+- **Initial**: Applies recommendations only at pod creation
+- **Recreate**: Restarts pods with new recommendations
+- **Auto**: Updates resources without restarting (requires in-place pod resize feature)
+
+---
+
+## Cluster Autoscaler
+
+### Overview
+Cluster Autoscaler automatically adjusts the number of nodes in the cluster based on pod resource requirements.
+
+### How It Works
+1. Monitors pending pods that can't be scheduled
+2. Checks if adding nodes would help
+3. Scales up node groups if needed
+4. Scales down underutilized nodes (respecting PDBs)
+
+### AWS Example
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: cluster-autoscaler
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler
+    spec:
+      serviceAccountName: cluster-autoscaler
+      containers:
+      - image: k8s.gcr.io/autoscaling/cluster-autoscaler:v1.28.0
+        name: cluster-autoscaler
+        command:
+        - ./cluster-autoscaler
+        - --cloud-provider=aws
+        - --namespace=kube-system
+        - --node-group-auto-discovery=asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/my-cluster
+        - --balance-similar-node-groups
+        - --skip-nodes-with-system-pods=false
+        env:
+        - name: AWS_REGION
+          value: us-east-1
+```
+
+---
+
+## Pod Disruption Budget (PDB)
+
+### Overview
+PDB limits the number of pods that can be disrupted simultaneously during voluntary disruptions.
+
+### Basic PDB
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: app-pdb
+spec:
+  minAvailable: 2  # At least 2 pods must remain available
+  selector:
+    matchLabels:
+      app: myapp
+```
+
+### PDB with Percentage
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: app-pdb-percent
+spec:
+  maxUnavailable: "25%"  # Max 25% of pods can be unavailable
+  selector:
+    matchLabels:
+      app: myapp
+```
+
+### PDB Examples
+```yaml
+# Ensure high availability
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: critical-app-pdb
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: critical-app
+      tier: production
+---
+# Allow some disruption
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: background-worker-pdb
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: worker
+```
+
+---
+
+## Resource Quotas & Limit Ranges
+
+### Resource Quotas (Detailed)
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: comprehensive-quota
+  namespace: development
+spec:
+  hard:
+    # Compute resources
+    requests.cpu: "20"
+    requests.memory: 40Gi
+    limits.cpu: "40"
+    limits.memory: 80Gi
+    
+    # Storage
+    requests.storage: 200Gi
+    persistentvolumeclaims: "10"
+    
+    # Object counts
+    count/pods: "100"
+    count/services: "50"
+    count/secrets: "50"
+    count/configmaps: "50"
+    count/replicationcontrollers: "20"
+    count/deployments.apps: "20"
+    count/statefulsets.apps: "10"
+    count/jobs.batch: "50"
+    count/cronjobs.batch: "20"
+    
+    # Network
+    services.loadbalancers: "5"
+    services.nodeports: "10"
+```
+
+### Limit Ranges (Detailed)
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: comprehensive-limits
+  namespace: development
+spec:
+  limits:
+  # Container limits
+  - type: Container
+    default:
+      cpu: "500m"
+      memory: "512Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    max:
+      cpu: "2"
+      memory: "2Gi"
+    min:
+      cpu: "50m"
+      memory: "64Mi"
+    maxLimitRequestRatio:
+      cpu: "4"
+      memory: "2"
+  
+  # Pod limits
+  - type: Pod
+    max:
+      cpu: "4"
+      memory: "4Gi"
+    min:
+      cpu: "100m"
+      memory: "128Mi"
+  
+  # PVC limits
+  - type: PersistentVolumeClaim
+    max:
+      storage: "100Gi"
+    min:
+      storage: "1Gi"
+```
+
+---
+
+# Observability
+
+## Probes (Health Checks)
+
+### Liveness Probe
+Determines if container is alive. Kubelet restarts container if probe fails.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: liveness-pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+        httpHeaders:
+        - name: Custom-Header
+          value: Awesome
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      successThreshold: 1
+      failureThreshold: 3
+```
+
+### Readiness Probe
+Determines if container is ready to serve traffic. Pod removed from service endpoints if probe fails.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: readiness-pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 3
+      successThreshold: 1
+      failureThreshold: 3
+```
+
+### Startup Probe
+For slow-starting containers. Other probes disabled until startup probe succeeds.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: startup-pod
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    startupProbe:
+      httpGet:
+        path: /startup
+        port: 8080
+      failureThreshold: 30
+      periodSeconds: 10
+      # Gives container up to 300 seconds (30 * 10) to start
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      periodSeconds: 10
+```
+
+### Probe Types
+
+#### HTTP GET
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+    scheme: HTTPS
+```
+
+#### TCP Socket
+```yaml
+livenessProbe:
+  tcpSocket:
+    port: 3306
+  initialDelaySeconds: 15
+  periodSeconds: 20
+```
+
+#### Exec Command
+```yaml
+livenessProbe:
+  exec:
+    command:
+    - cat
+    - /tmp/healthy
+  initialDelaySeconds: 5
+  periodSeconds: 5
+```
+
+#### gRPC
+```yaml
+livenessProbe:
+  grpc:
+    port: 9090
+  initialDelaySeconds: 10
+```
+
+---
+
+## Logging
+
+### Container Logs
+```bash
+# View logs
+kubectl logs pod-name
+kubectl logs pod-name -c container-name
+
+# Follow logs
+kubectl logs -f pod-name
+
+# Previous container logs
+kubectl logs pod-name --previous
+
+# Tail logs
+kubectl logs pod-name --tail=100
+
+# Logs since timestamp
+kubectl logs pod-name --since=1h
+kubectl logs pod-name --since-time=2024-01-15T10:00:00Z
+
+# All containers in pod
+kubectl logs pod-name --all-containers=true
+
+# Multi-pod logs
+kubectl logs -l app=nginx
+
+# Logs from all namespaces
+kubectl logs -l app=nginx --all-namespaces
+```
+
+### Logging Architecture
+
+#### Node-level Logging
+```yaml
+# Application writes to stdout/stderr
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+spec:
+  containers:
+  - name: app
+    image: busybox
+    command: ["/bin/sh"]
+    args: ["-c", "while true; do echo $(date) Hello; sleep 1; done"]
+```
+
+#### Sidecar Container for Logs
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: counter
+spec:
+  containers:
+  # Main container writes to file
+  - name: count
+    image: busybox
+    command: ["/bin/sh"]
+    args:
+    - -c
+    - >
+      i=0;
+      while true;
+      do
+        echo "$i: $(date)" >> /var/log/app.log;
+        i=$((i+1));
+        sleep 1;
+      done
+    volumeMounts:
+    - name: varlog
+      mountPath: /var/log
+  
+  # Sidecar streams file to stdout
+  - name: log-shipper
+    image: busybox
+    command: ["/bin/sh"]
+    args: ["-c", "tail -f /var/log/app.log"]
+    volumeMounts:
+    - name: varlog
+      mountPath: /var/log
+  
+  volumes:
+  - name: varlog
+    emptyDir: {}
+```
+
+### EFK Stack (Elasticsearch, Fluentd, Kibana)
+
+#### Fluentd DaemonSet
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentd
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: fluentd
+  template:
+    metadata:
+      labels:
+        name: fluentd
+    spec:
+      serviceAccountName: fluentd
+      containers:
+      - name: fluentd
+        image: fluent/fluentd-kubernetes-daemonset:v1-debian-elasticsearch
+        env:
+        - name: FLUENT_ELASTICSEARCH_HOST
+          value: "elasticsearch.logging.svc.cluster.local"
+        - name: FLUENT_ELASTICSEARCH_PORT
+          value: "9200"
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: containers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: containers
+        hostPath:
+          path: /var/lib/docker/containers
+```
+
+---
+
+## Monitoring
+
+### Metrics Server
+```bash
+# Install metrics server
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+# View node metrics
+kubectl top nodes
+
+# View pod metrics
+kubectl top pods
+kubectl top pods -n kube-system
+kubectl top pods --all-namespaces
+
+# Sort by CPU/memory
+kubectl top pods --sort-by=cpu
+kubectl top pods --sort-by=memory
+
+# Container metrics
+kubectl top pods --containers
+```
+
+### Prometheus & Grafana
+
+#### Prometheus Operator
+```bash
+# Install using Helm
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install prometheus prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --create-namespace
+```
+
+#### ServiceMonitor
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: app-monitor
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: myapp
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+```
+
+#### PodMonitor
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: app-pod-monitor
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: myapp
+  podMetricsEndpoints:
+  - port: metrics
+    interval: 30s
+```
+
+### Custom Metrics
+
+#### Prometheus Annotations
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: app-pod
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+spec:
+  containers:
+  - name: app
+    image: myapp:1.0
+    ports:
+    - containerPort: 9090
+      name: metrics
+```
+
+---
+
+## Tracing
+
+### Distributed Tracing with Jaeger
+```yaml
+# Jaeger all-in-one
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: observability
+spec:
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+      - name: jaeger
+        image: jaegertracing/all-in-one:latest
+        ports:
+        - containerPort: 5775
+          protocol: UDP
+        - containerPort: 6831
+          protocol: UDP
+        - containerPort: 6832
+          protocol: UDP
+        - containerPort: 5778
+        - containerPort: 16686
+        - containerPort: 14268
+```
+
+---
+
+# CI/CD & DevOps
+
+## GitOps with ArgoCD
+
+### Installing ArgoCD
+```bash
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# Get admin password
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+
+# Port forward to access UI
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+```
+
+### ArgoCD Application
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: myapp
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/myorg/myapp
+    targetRevision: HEAD
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+```
+
+### App of Apps Pattern
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: apps
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/myorg/apps
+    targetRevision: HEAD
+    path: apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+---
+
+## Helm
+
+### Helm Basics
+```bash
+# Add repository
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm repo update
+
+# Search charts
+helm search repo nginx
+
+# Install chart
+helm install my-nginx bitnami/nginx
+
+# Install with custom values
+helm install my-nginx bitnami/nginx -f values.yaml
+helm install my-nginx bitnami/nginx --set service.type=LoadBalancer
+
+# List releases
+helm list
+helm list --all-namespaces
+
+# Upgrade release
+helm upgrade my-nginx bitnami/nginx
+helm upgrade my-nginx bitnami/nginx -f new-values.yaml
+
+# Rollback
+helm rollback my-nginx 1
+
+# Uninstall
+helm uninstall my-nginx
+```
+
+### Creating Custom Chart
+```bash
+# Create chart
+helm create mychart
+
+# Chart structure
+mychart/
+  Chart.yaml          # Chart metadata
+  values.yaml         # Default values
+  charts/             # Chart dependencies
+  templates/          # Template files
+    deployment.yaml
+    service.yaml
+    ingress.yaml
+    _helpers.tpl
+```
+
+### Chart.yaml
+```yaml
+apiVersion: v2
+name: myapp
+description: A Helm chart for my application
+type: application
+version: 1.0.0
+appVersion: "2.0"
+dependencies:
+- name: postgresql
+  version: 12.x.x
+  repository: https://charts.bitnami.com/bitnami
+```
+
+### values.yaml
+```yaml
+replicaCount: 3
+
+image:
+  repository: myapp
+  tag: "1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+  - host: myapp.example.com
+    paths:
+    - path: /
+      pathType: Prefix
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+```
+
+### Template Example
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "myapp.fullname" . }}
+  labels:
+    {{- include "myapp.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "myapp.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "myapp.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+      - name: {{ .Chart.Name }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+```
+
+---
+
+## Kustomize
+
+### Overview
+Kustomize customizes Kubernetes YAML configurations without templates.
+
+### Basic Structure
+```
+├── base/
+│   ├── kustomization.yaml
+│   ├── deployment.yaml
+│   └── service.yaml
+└── overlays/
+    ├── development/
+    │   └── kustomization.yaml
+    ├── staging/
+    │   └── kustomization.yaml
+    └── production/
+        └── kustomization.yaml
+```
+
+### Base kustomization.yaml
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- deployment.yaml
+- service.yaml
+
+commonLabels:
+  app: myapp
+  
+namespace: default
+```
+
+### Overlay kustomization.yaml (Production)
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+bases:
+- ../../base
+
+namespace: production
+
+replicas:
+- name: myapp
+  count: 5
+
+images:
+- name: myapp
+  newTag: v1.2.3
+
+patchesStrategicMerge:
+- resource-patch.yaml
+
+configMapGenerator:
+- name: app-config
+  literals:
+  - ENV=production
+  - LOG_LEVEL=info
+
+secretGenerator:
+- name: app-secret
+  literals:
+  - DB_PASSWORD=prod-password
+```
+
+### Using Kustomize
+```bash
+# Build and view
+kubectl kustomize overlays/production
+
+# Apply directly
+kubectl apply -k overlays/production
+
+# Build to file
+kubectl kustomize overlays/production > production.yaml
+```
+
+---
+
+# Advanced Kubernetes
+
+## Custom Resource Definitions (CRD)
+
+### Creating CRD
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: applications.stable.example.com
+spec:
+  group: stable.example.com
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              image:
+                type: string
+              replicas:
+                type: integer
+                minimum: 1
+                maximum: 10
+              port:
+                type: integer
+          status:
+            type: object
+            properties:
+              availableReplicas:
+                type: integer
+  scope: Namespaced
+  names:
+    plural: applications
+    singular: application
+    kind: Application
+    shortNames:
+    - app
+```
+
+### Using Custom Resource
+```yaml
+apiVersion: stable.example.com/v1
+kind: Application
+metadata:
+  name: my-application
+spec:
+  image: nginx:1.25
+  replicas: 3
+  port: 80
+```
+
+---
+
+## Operators
+
+### Operator Pattern
+Operators extend Kubernetes to manage complex applications using custom resources.
+
+### Example: PostgreSQL Operator
+```yaml
+apiVersion: acid.zalan.do/v1
+kind: postgresql
+metadata:
+  name: acid-minimal-cluster
+spec:
+  teamId: "acid"
+  volume:
+    size: 1Gi
+  numberOfInstances: 2
+  users:
+    zalando:
+    - superuser
+    - createdb
+  databases:
+    foo: zalando
+  postgresql:
+    version: "15"
+```
+
+---
+
+## Admission Controllers
+
+### ValidatingWebhook
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: pod-policy-webhook
+webhooks:
+- name: validate.example.com
+  clientConfig:
+    service:
+      name: validation-service
+      namespace: default
+      path: "/validate"
+    caBundle: LS0tLS...
+  rules:
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+```
+
+### MutatingWebhook
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: pod-mutator-webhook
+webhooks:
+- name: mutate.example.com
+  clientConfig:
+    service:
+      name: mutation-service
+      namespace: default
+      path: "/mutate"
+    caBundle: LS0tLS...
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  admissionReviewVersions: ["v1"]
+  sideEffects: None
+```
+
+---
+
+## Service Mesh (Istio)
+
+### Installing Istio
+```bash
+curl -L https://istio.io/downloadIstio | sh -
+cd istio-*
+export PATH=$PWD/bin:$PATH
+istioctl install --set profile=demo -y
+
+# Enable sidecar injection
+kubectl label namespace default istio-injection=enabled
+```
+
+### Virtual Service
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: myapp
+spec:
+  hosts:
+  - myapp
+  http:
+  - match:
+    - headers:
+        end-user:
+          exact: jason
+    route:
+    - destination:
+        host: myapp
+        subset: v2
+  - route:
+    - destination:
+        host: myapp
+        subset: v1
+      weight: 90
+    - destination:
+        host: myapp
+        subset: v2
+      weight: 10
+```
+
+### Destination Rule
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: myapp
+spec:
+  host: myapp
+  trafficPolicy:
+    loadBalancer:
+      simple: ROUND_ROBIN
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+```
+
+---
+
+# Production Best Practices
+
+## High Availability
+
+### Multi-Master Setup
+```yaml
+# 3 master nodes minimum
+Master Nodes: 3 (or 5 for critical systems)
+Worker Nodes: 3+ (distributed across availability zones)
+etcd: 3 or 5 nodes (odd number)
+
+# Load balancer for API server
+API Server Load Balancer:
+- Health checks on port 6443
+- Distribute across all masters
+```
+
+### Pod Distribution
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 6
+  template:
+    spec:
+      affinity:
+        # Spread across nodes
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - myapp
+              topologyKey: kubernetes.io/hostname
+        # Spread across zones
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - myapp
+              topologyKey: topology.kubernetes.io/zone
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: myapp
+```
+
+---
+
+## Security Best Practices
+
+### Security Checklist
+```yaml
+    RBAC enabled and configured
+    Pod Security Standards enforced
+    Network Policies implemented
+    Secrets encrypted at rest
+    Regular security updates
+    Admission controllers active
+    Audit logging enabled
+    TLS everywhere
+    Image scanning in CI/CD
+    Runtime security monitoring
+```
+
+### Secure Pod Template
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secure-pod
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10000
+    fsGroup: 10000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: app
+    image: myapp:1.0
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      capabilities:
+        drop:
+        - ALL
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+    volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+  volumes:
+  - name: tmp
+    emptyDir: {}
+```
+
+---
+
+## Resource Management
+
+### Resource Requests and Limits
+```yaml
+# Conservative (guaranteed QoS)
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "200m"
+  limits:
+    memory: "256Mi"
+    cpu: "200m"
+
+# Burstable (balanced)
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+# Best-effort (no guarantees)
+# No requests or limits set
+```
+
+---
+
+## Backup and Disaster Recovery
+
+### Velero Backup
+```bash
+# Install Velero
+velero install \
+  --provider aws \
+  --plugins velero/velero-plugin-for-aws:v1.8.0 \
+  --bucket velero-backups \
+  --backup-location-config region=us-east-1 \
+  --snapshot-location-config region=us-east-1
+
+# Create backup
+velero backup create my-backup
+
+# Schedule backups
+velero schedule create daily-backup --schedule="0 2 * * *"
+
+# Restore
+velero restore create --from-backup my-backup
+```
+
+### Backup Strategy
+```yaml
+Full Cluster Backup:
+- etcd snapshots (daily)
+- Persistent volume snapshots
+- Application configuration backups
+
+Recovery Objectives:
+- RPO: < 1 hour
+- RTO: < 4 hours
+
+Backup Locations:
+- Primary: Cloud storage
+- Secondary: Different region
+- Tertiary: On-premises (compliance)
+```
+
+---
+
+## Troubleshooting Guide
+
+### Common Issues
+
+#### Pod Stuck in Pending
+```bash
+kubectl describe pod <pod-name>
+# Check:
+# - Insufficient resources
+# - Node selector mismatch
+# - PV not available
+# - Image pull issues
+```
+
+#### Pod CrashLoopBackOff
+```bash
+kubectl logs <pod-name> --previous
+kubectl describe pod <pod-name>
+# Check:
+# - Application errors
+# - Missing dependencies
+# - Resource limits too low
+# - Liveness probe failures
+```
+
+#### Service Not Accessible
+```bash
+# Check endpoints
+kubectl get endpoints <service-name>
+
+# Check service
+kubectl describe service <service-name>
+
+# Check network policies
+kubectl get networkpolicies
+
+# Test connectivity
+kubectl run test-pod --rm -it --image=busybox -- wget -O- <service-name>
+```
+
+---
+
+## Performance Optimization
+
+### Node Performance
+```yaml
+# Node tuning
+kubelet flags:
+  --max-pods=110
+  --kube-reserved=cpu=100m,memory=1Gi
+  --system-reserved=cpu=100m,memory=1Gi
+  --eviction-hard=memory.available<500Mi
+```
+
+### Application Optimization
+```yaml
+# Use readiness probes
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+
+# Set appropriate resource limits
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+# Use horizontal scaling
+horizontalPodAutoscaler:
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPU
