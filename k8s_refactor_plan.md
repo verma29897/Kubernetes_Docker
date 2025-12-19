@@ -6358,4 +6358,875 @@ resources:
 horizontalPodAutoscaler:
   minReplicas: 3
   maxReplicas: 10
-  targetCPU
+  targetCPUUtilizationPercentage: 70
+
+# Enable topology spread
+topologySpreadConstraints:
+- maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: DoNotSchedule
+  labelSelector:
+    matchLabels:
+      app: myapp
+```
+
+### Network Performance
+```yaml
+# Use headless services for direct pod-to-pod
+apiVersion: v1
+kind: Service
+metadata:
+  name: fast-service
+spec:
+  clusterIP: None
+  selector:
+    app: myapp
+  ports:
+  - port: 8080
+
+# Use service mesh for intelligent routing
+# Enable connection pooling and circuit breaking
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: myapp-circuit-breaker
+spec:
+  host: myapp
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+    outlierDetection:
+      consecutiveErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+```
+
+### Storage Performance
+```yaml
+# Use appropriate storage class
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+provisioner: kubernetes.io/aws-ebs
+parameters:
+  type: gp3
+  iops: "10000"
+  throughput: "250"
+volumeBindingMode: WaitForFirstConsumer
+
+# Use local storage for high performance
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-pv-fast
+spec:
+  capacity:
+    storage: 100Gi
+  volumeMode: Filesystem
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: local-fast
+  local:
+    path: /mnt/nvme0n1
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - high-perf-node-1
+```
+
+### DNS Optimization
+```yaml
+# Reduce DNS lookups with ndots
+apiVersion: v1
+kind: Pod
+metadata:
+  name: optimized-dns-pod
+spec:
+  dnsConfig:
+    options:
+    - name: ndots
+      value: "2"
+    - name: timeout
+      value: "2"
+    - name: attempts
+      value: "2"
+  containers:
+  - name: app
+    image: myapp:1.0
+```
+
+---
+
+## Cluster Maintenance
+
+### Node Maintenance
+
+#### Drain Node
+```bash
+# Safely drain node (evict pods)
+kubectl drain node-1 --ignore-daemonsets --delete-emptydir-data
+
+# Uncordon node (make schedulable again)
+kubectl uncordon node-1
+
+# Cordon node (prevent new pods)
+kubectl cordon node-1
+```
+
+#### Node Upgrade Process
+```bash
+# 1. Drain node
+kubectl drain node-1 --ignore-daemonsets --delete-emptydir-data --force
+
+# 2. Perform upgrade on node (SSH to node)
+# - Update kubelet, kubectl, kubeadm
+# - Restart services
+
+# 3. Uncordon node
+kubectl uncordon node-1
+
+# 4. Verify
+kubectl get nodes
+```
+
+### Cluster Upgrade
+
+#### Control Plane Upgrade
+```bash
+# Upgrade kubeadm
+apt-mark unhold kubeadm
+apt-get update && apt-get install -y kubeadm=1.29.0-00
+apt-mark hold kubeadm
+
+# Check upgrade plan
+kubeadm upgrade plan
+
+# Apply upgrade
+kubeadm upgrade apply v1.29.0
+
+# Upgrade kubelet and kubectl
+apt-mark unhold kubelet kubectl
+apt-get update && apt-get install -y kubelet=1.29.0-00 kubectl=1.29.0-00
+apt-mark hold kubelet kubectl
+
+# Restart kubelet
+systemctl daemon-reload
+systemctl restart kubelet
+```
+
+#### Worker Node Upgrade
+```bash
+# On control plane - drain worker
+kubectl drain worker-1 --ignore-daemonsets --delete-emptydir-data
+
+# On worker node - upgrade kubeadm
+apt-mark unhold kubeadm
+apt-get update && apt-get install -y kubeadm=1.29.0-00
+apt-mark hold kubeadm
+
+# Upgrade node
+kubeadm upgrade node
+
+# Upgrade kubelet and kubectl
+apt-mark unhold kubelet kubectl
+apt-get update && apt-get install -y kubelet=1.29.0-00 kubectl=1.29.0-00
+apt-mark hold kubelet kubectl
+systemctl daemon-reload
+systemctl restart kubelet
+
+# On control plane - uncordon worker
+kubectl uncordon worker-1
+```
+
+### etcd Backup and Restore
+
+#### Backup etcd
+```bash
+# Snapshot etcd
+ETCDCTL_API=3 etcdctl snapshot save snapshot.db \
+  --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key
+
+# Verify snapshot
+ETCDCTL_API=3 etcdctl snapshot status snapshot.db --write-out=table
+```
+
+#### Restore etcd
+```bash
+# Stop kube-apiserver
+systemctl stop kube-apiserver
+
+# Restore from snapshot
+ETCDCTL_API=3 etcdctl snapshot restore snapshot.db \
+  --data-dir=/var/lib/etcd-restore \
+  --initial-cluster=etcd-1=https://10.0.0.1:2380 \
+  --initial-advertise-peer-urls=https://10.0.0.1:2380 \
+  --name=etcd-1
+
+# Update etcd configuration to use new data directory
+# Restart etcd and kube-apiserver
+systemctl restart etcd
+systemctl start kube-apiserver
+```
+
+---
+
+## Multi-Tenancy
+
+### Namespace Isolation
+```yaml
+# Create tenant namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-acme
+  labels:
+    tenant: acme
+---
+# Resource quota
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-acme-quota
+  namespace: tenant-acme
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: 20Gi
+    limits.cpu: "20"
+    limits.memory: 40Gi
+    persistentvolumeclaims: "10"
+    pods: "50"
+---
+# Network policy - deny all by default
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: tenant-acme
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+# Network policy - allow DNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: tenant-acme
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+```
+
+### Tenant RBAC
+```yaml
+# Tenant admin role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-admin
+  namespace: tenant-acme
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+---
+# Tenant admin binding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tenant-admin-binding
+  namespace: tenant-acme
+subjects:
+- kind: User
+  name: acme-admin
+  apiGroup: rbac.authorization.k8s.io
+- kind: Group
+  name: acme-admins
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: tenant-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+# Tenant developer role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tenant-developer
+  namespace: tenant-acme
+rules:
+- apiGroups: ["", "apps", "batch"]
+  resources: ["pods", "deployments", "services", "jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+```
+
+### Hierarchical Namespaces (HNC)
+```yaml
+# Parent namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: company-acme
+---
+# Child namespace
+apiVersion: hnc.x-k8s.io/v1alpha2
+kind: SubnamespaceAnchor
+metadata:
+  name: team-alpha
+  namespace: company-acme
+---
+# Hierarchical configuration
+apiVersion: hnc.x-k8s.io/v1alpha2
+kind: HierarchyConfiguration
+metadata:
+  name: hierarchy
+  namespace: company-acme
+spec:
+  allowCascadingDeletion: true
+```
+
+---
+
+## Cost Optimization
+
+### Resource Right-Sizing
+```yaml
+# Use VPA for recommendations
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: cost-optimizer-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: myapp
+  updatePolicy:
+    updateMode: "Off"  # Recommendations only
+```
+
+### Spot/Preemptible Instances
+```yaml
+# Node affinity for spot instances
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch-processor
+spec:
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 50
+            preference:
+              matchExpressions:
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - spot
+      tolerations:
+      - key: node.kubernetes.io/instance-type
+        operator: Equal
+        value: spot
+        effect: NoSchedule
+```
+
+### Cluster Autoscaler for Cost
+```yaml
+# Configure cluster autoscaler for cost optimization
+--scale-down-enabled=true
+--scale-down-delay-after-add=10m
+--scale-down-unneeded-time=10m
+--skip-nodes-with-system-pods=false
+--balance-similar-node-groups=true
+--expander=least-waste  # or priority
+```
+
+### Resource Quotas by Cost Center
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: cost-center-engineering
+  namespace: engineering
+  labels:
+    cost-center: "CC-12345"
+spec:
+  hard:
+    requests.cpu: "50"
+    requests.memory: 100Gi
+    limits.cpu: "100"
+    limits.memory: 200Gi
+```
+
+---
+
+## Compliance and Governance
+
+### Pod Security Standards
+```yaml
+# Enforce pod security standard at namespace level
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+```
+
+### Policy Enforcement (OPA Gatekeeper)
+```yaml
+# Install Gatekeeper
+kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/gatekeeper/release-3.14/deploy/gatekeeper.yaml
+
+# Constraint template
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredlabels
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredLabels
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            labels:
+              type: array
+              items:
+                type: string
+  targets:
+  - target: admission.k8s.gatekeeper.sh
+    rego: |
+      package k8srequiredlabels
+      
+      violation[{"msg": msg, "details": {"missing_labels": missing}}] {
+        provided := {label | input.review.object.metadata.labels[label]}
+        required := {label | label := input.parameters.labels[_]}
+        missing := required - provided
+        count(missing) > 0
+        msg := sprintf("You must provide labels: %v", [missing])
+      }
+---
+# Constraint
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredLabels
+metadata:
+  name: require-labels
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Namespace"]
+  parameters:
+    labels:
+    - cost-center
+    - owner
+    - environment
+```
+
+### Audit Logging
+```yaml
+# Audit policy
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+# Log all requests at metadata level
+- level: Metadata
+  omitStages:
+  - RequestReceived
+
+# Don't log read-only requests
+- level: None
+  verbs: ["get", "list", "watch"]
+
+# Log Secret operations at Request level
+- level: Request
+  resources:
+  - group: ""
+    resources: ["secrets"]
+
+# Log pod exec and attach at Request level
+- level: Request
+  verbs: ["create"]
+  resources:
+  - group: ""
+    resources: ["pods/exec", "pods/attach"]
+
+# Log authentication and authorization
+- level: Request
+  nonResourceURLs:
+  - /api*
+  - /version
+```
+
+---
+
+## Disaster Recovery Scenarios
+
+### Scenario 1: Node Failure
+```bash
+# Node failure detected
+kubectl get nodes
+
+# Pods automatically rescheduled to healthy nodes
+kubectl get pods -o wide
+
+# Replace failed node
+# 1. Remove old node
+kubectl delete node node-1
+
+# 2. Provision new node
+# 3. Join to cluster
+kubeadm join <control-plane-ip>:6443 --token <token> --discovery-token-ca-cert-hash <hash>
+```
+
+### Scenario 2: Control Plane Failure
+```bash
+# If using HA setup, other control plane nodes continue
+kubectl get componentstatuses
+
+# Restore failed control plane node
+# 1. Restore etcd from backup
+# 2. Rejoin control plane
+
+# If total control plane loss, restore from backup
+etcdctl snapshot restore snapshot.db
+```
+
+### Scenario 3: Full Cluster Loss
+```bash
+# 1. Provision new cluster
+kubeadm init
+
+# 2. Restore etcd data
+etcdctl snapshot restore
+
+# 3. Restore application configs from Git/Backup
+kubectl apply -f backup/manifests/
+
+# 4. Restore persistent data from volume snapshots
+kubectl apply -f backup/pvcs/
+```
+
+### Scenario 4: Namespace Deletion
+```bash
+# Immediate action - try to stop deletion
+kubectl patch namespace production -p '{"metadata":{"finalizers":[]}}' --type=merge
+
+# If too late, restore from backup
+velero restore create --from-backup production-backup
+
+# Or restore from Git
+kubectl apply -f production-namespace-backup/
+```
+
+---
+
+## Advanced Networking
+
+### IPv4/IPv6 Dual Stack
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: dual-stack-service
+spec:
+  ipFamilyPolicy: PreferDualStack
+  ipFamilies:
+  - IPv4
+  - IPv6
+  selector:
+    app: myapp
+  ports:
+  - port: 80
+```
+
+### Multi-Cluster Service Mesh
+```yaml
+# Istio multi-cluster setup
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: multi-cluster
+spec:
+  meshConfig:
+    defaultConfig:
+      proxyMetadata:
+        ISTIO_META_DNS_CAPTURE: "true"
+  values:
+    global:
+      meshID: mesh1
+      multiCluster:
+        clusterName: cluster-1
+      network: network-1
+```
+
+### Network Policies - Advanced
+```yaml
+# Allow traffic from specific IP blocks and namespaces
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: complex-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from specific namespace and pod labels
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          environment: production
+      podSelector:
+        matchLabels:
+          tier: frontend
+    # Allow from specific IP range
+    - ipBlock:
+        cidr: 10.0.0.0/8
+        except:
+        - 10.0.1.0/24
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow to database
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow HTTPS to external
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+```
+
+---
+
+## Kubernetes API
+
+### API Versioning
+```yaml
+# Alpha (may change, disabled by default)
+apiVersion: foo.example.com/v1alpha1
+
+# Beta (well tested, enabled by default)
+apiVersion: foo.example.com/v1beta1
+
+# Stable (production ready)
+apiVersion: foo.example.com/v1
+```
+
+### API Groups
+```yaml
+# Core group (no group name)
+apiVersion: v1
+kind: Pod
+
+# Named groups
+apiVersion: apps/v1
+kind: Deployment
+
+apiVersion: batch/v1
+kind: Job
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+```
+
+### Custom API Access
+```bash
+# List API resources
+kubectl api-resources
+
+# List API versions
+kubectl api-versions
+
+# Explain resource
+kubectl explain pod
+kubectl explain pod.spec.containers
+
+# Direct API access
+kubectl proxy --port=8080
+
+# Then use curl
+curl http://localhost:8080/api/v1/namespaces/default/pods
+```
+
+---
+
+## Final Best Practices Summary
+
+### Development
+- Use namespaces for isolation
+- Implement proper health checks
+- Set resource requests/limits
+- Use ConfigMaps and Secrets
+- Version your manifests in Git
+- Use Helm or Kustomize for templating
+
+### Production
+- Implement HA for control plane
+- Use multiple replicas
+- Configure PodDisruptionBudgets
+- Implement network policies
+- Enable audit logging
+- Regular backups (etcd, volumes)
+- Monitor everything
+- Implement autoscaling (HPA, VPA, CA)
+
+### Security
+- Enable RBAC
+- Use Pod Security Standards
+- Scan images for vulnerabilities
+- Rotate secrets regularly
+- Use network policies
+- Encrypt secrets at rest
+- Regular security audits
+- Implement admission controllers
+
+### Operations
+- Automate with GitOps
+- Implement CI/CD pipelines
+- Use Infrastructure as Code
+- Regular cluster upgrades
+- Disaster recovery testing
+- Capacity planning
+- Cost monitoring
+- Documentation
+
+---
+
+## Quick Reference Commands
+
+### Essential kubectl Commands
+```bash
+# Cluster info
+kubectl cluster-info
+kubectl get nodes
+kubectl version
+
+# Resource management
+kubectl get pods -A
+kubectl describe pod <pod-name>
+kubectl logs <pod-name>
+kubectl exec -it <pod-name> -- /bin/bash
+
+# Apply manifests
+kubectl apply -f manifest.yaml
+kubectl apply -f ./directory/
+kubectl delete -f manifest.yaml
+
+# Scaling
+kubectl scale deployment <name> --replicas=3
+kubectl autoscale deployment <name> --min=2 --max=10
+
+# Updates
+kubectl set image deployment/<name> container=image:tag
+kubectl rollout status deployment/<name>
+kubectl rollout undo deployment/<name>
+
+# Debugging
+kubectl get events
+kubectl top nodes
+kubectl top pods
+kubectl describe node <node-name>
+
+# Context management
+kubectl config get-contexts
+kubectl config use-context <context>
+kubectl config set-context --current --namespace=<namespace>
+```
+
+---
+
+## Conclusion
+
+This comprehensive Kubernetes documentation covers:
+
+**Fundamentals**: Architecture, components, core objects
+**Networking**: Services, Ingress, DNS, CNI, Network Policies
+**Storage**: Volumes, PV/PVC, StorageClass, CSI
+**Security**: RBAC, Secrets, Pod Security, Network Policies
+**Scaling**: HPA, VPA, Cluster Autoscaler, PDB
+**Observability**: Logging, Monitoring, Tracing
+**CI/CD**: ArgoCD, Helm, Kustomize
+**Advanced**: CRDs, Operators, Service Mesh, Admission Controllers
+**Production**: HA, Backup/DR, Performance, Cost Optimization
+**Operations**: Maintenance, Upgrades, Troubleshooting
+
+**Next Steps:**
+1. Set up a test cluster (minikube, kind, or cloud provider)
+2. Practice with examples from each section
+3. Build real applications
+4. Implement monitoring and logging
+5. Automate with CI/CD
+6. Prepare for CKA/CKAD/CKS certification
+
+**Resources:**
+- Official Docs: https://kubernetes.io/docs
+- GitHub: https://github.com/kubernetes/kubernetes
+- CNCF Slack: https://slack.cncf.io
+- Kubernetes Blog: https://kubernetes.io/blog
+
+---
+
+**Happy Kubernetes Journey! 🚀**
